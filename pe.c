@@ -85,6 +85,8 @@ static PE_CTX *pe_ctx_get(char *indata, uint32_t filesize);
 static PKCS7 *pe_pkcs7_get_file(char *indata, PE_CTX *pe_ctx);
 static uint32_t pe_calc_checksum(BIO *bio, uint32_t header_size);
 static uint32_t pe_calc_realchecksum(FILE_FORMAT_CTX *ctx);
+static uint64_t pe_checksum_add(uint64_t sum, const u_char *data, size_t len, uint32_t offset);
+static uint32_t pe_checksum_fold(uint64_t sum);
 static int pe_modify_header(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
 static BIO *pe_digest_calc_bio(FILE_FORMAT_CTX *ctx, const EVP_MD *md);
 static int pkcs7_get_page_hash(PKCS7 *p7, u_char **ph, int *phlen, int *phtype);
@@ -666,40 +668,54 @@ static uint32_t pe_calc_checksum(BIO *outdata, uint32_t header_size)
  */
 static uint32_t pe_calc_realchecksum(FILE_FORMAT_CTX *ctx)
 {
-    uint32_t n = 0, checkSum = 0, offset = 0;
-    BIO *bio = BIO_new(BIO_s_mem());
-    unsigned short *buf = OPENSSL_malloc(SIZE_64K);
+    const u_char *indata = (const u_char *)ctx->options->indata;
+    uint32_t field = ctx->pe_ctx->header_size + 88;
+    /* ignore any last odd byte in an unsigned file */
+    uint32_t len = ctx->pe_ctx->fileend & ~1U;
+    uint64_t sum;
 
-    /* calculate the checkSum */
-    while (n < ctx->pe_ctx->fileend) {
-        size_t i, written, nread;
-        size_t left = ctx->pe_ctx->fileend - n;
-        unsigned short val;
-        if (left > SIZE_64K)
-            left = SIZE_64K;
-        if (!BIO_write_ex(bio, ctx->options->indata + n, left, &written))
-            goto err; /* FAILED */
-        (void)BIO_seek(bio, 0);
-        n += (uint32_t)written;
-        if (!BIO_read_ex(bio, buf, written, &nread))
-            goto err; /* FAILED */
-        for (i = 0; i < nread / 2; i++) {
-            val = LE_UINT16(buf[i]);
-            if (offset == ctx->pe_ctx->header_size + 88
-                || offset == ctx->pe_ctx->header_size + 90) {
-                val = 0;
-            }
-            checkSum += val;
-            checkSum = LOWORD(LOWORD(checkSum) + HIWORD(checkSum));
-            offset += 2;
-        }
+    /* skip the 4-byte CheckSum field itself */
+    sum = pe_checksum_add(0, indata, field, 0);
+    sum = pe_checksum_add(sum, indata + field + 4, len - field - 4, field + 4);
+    return pe_checksum_fold(sum) + len;
+}
+
+/*
+ * Add data located at a given file offset to a PE checksum partial sum.
+ * The checksum is a sum of little-endian 16-bit words, so a byte at an odd
+ * file offset is the high byte of its word, whatever the chunk boundaries.
+ * [in] sum: partial sum of the preceding data
+ * [in] data: data to add
+ * [in] len: data length
+ * [in] offset: file offset of the first byte of data
+ * [returns] updated partial sum
+ */
+static uint64_t pe_checksum_add(uint64_t sum, const u_char *data, size_t len, uint32_t offset)
+{
+    size_t i = 0;
+
+    if (len > 0 && offset % 2) {
+        sum += (uint64_t)data[0] << 8;
+        i = 1;
     }
-    checkSum = LOWORD(LOWORD(checkSum) + HIWORD(checkSum));
-    checkSum += offset;
-err:
-    OPENSSL_free(buf);
-    BIO_free(bio);
-    return checkSum;
+    for (; i + 1 < len; i += 2)
+        sum += (uint32_t)data[i] | ((uint32_t)data[i + 1] << 8);
+    if (i < len)
+        sum += data[i];
+    return sum;
+}
+
+/*
+ * Fold a partial sum into the 16-bit ones' complement sum used by the PE
+ * checksum: the same result as folding the carry after every word.
+ * [in] sum: partial sum
+ * [returns] folded sum
+ */
+static uint32_t pe_checksum_fold(uint64_t sum)
+{
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint32_t)sum;
 }
 
 /*
