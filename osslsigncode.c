@@ -3746,7 +3746,7 @@ static void usage(const char *argv0, const char *cmd)
         printf("%12s[ -h {md5,sha1,sha2(56),sha384,sha512} ]\n", "");
         printf("%12s[ -nest ]\n", "");
         printf("%12s[ -add-msi-dse ]\n", "");
-        printf("%12s[ -in ] <file> [ -out ] <file>\n\n", "");
+        printf("%12s[ -in ] <file> [ -out ] <file> | -in-place [ -in ] <file>\n\n", "");
     }
     if (on_list(cmd, cmds_extract)) {
         printf("%1sextract-signature [ -pem ]\n", "");
@@ -3813,6 +3813,7 @@ static void help_for(const char *argv0, const char *cmd)
 #endif /* OPENSSL_VERSION_NUMBER>=0x30000000L */
     const char *cmds_n[] = {"sign", NULL};
     const char *cmds_nest[] = {"attach-signature", "sign", NULL};
+    const char *cmds_in_place[] = {"attach-signature", NULL};
     const char *cmds_noverifypeer[] = {"add", "sign", NULL};
     const char *cmds_out[] = {"add", "attach-signature", "extract-signature",
         "remove-signature", "sign", "extract-data", NULL};
@@ -3935,6 +3936,10 @@ static void help_for(const char *argv0, const char *cmd)
         printf("%-24s= specifies a URL for expanded description of the signed content\n", "-i");
     if (on_list(cmd, cmds_in))
         printf("%-24s= input file\n", "-in");
+    if (on_list(cmd, cmds_in_place)) {
+        printf("%-24s= attach the signature to the input file instead of writing\n", "-in-place");
+        printf("%26san output file (unsigned PE files only)\n", "");
+    }
     if (on_list(cmd, cmds_index))
         printf("%-24s= use the signature at a certain position\n", "-index");
     if (on_list(cmd, cmds_jp)) {
@@ -4934,6 +4939,8 @@ static int main_configure(int argc, char **argv, GLOBAL_OPTIONS *options)
             }
         } else if ((cmd == CMD_SIGN || cmd == CMD_ATTACH) && !strcmp(*argv, "-nest")) {
             options->nest = 1;
+        } else if ((cmd == CMD_ATTACH) && !strcmp(*argv, "-in-place")) {
+            options->in_place = 1;
         } else if ((cmd == CMD_ADD || cmd == CMD_VERIFY) && !strcmp(*argv, "-index")) {
             char *tmp_str;
             if (--argc < 1 ) {
@@ -5102,7 +5109,8 @@ static int main_configure(int argc, char **argv, GLOBAL_OPTIONS *options)
         (options->nturl && options->tsa_certfile && options->tsa_keyfile) ||
         (options->ntsurl && options->tsa_certfile && options->tsa_keyfile) ||
         !options->infile ||
-        (cmd != CMD_VERIFY && !options->outfile) ||
+        (cmd != CMD_VERIFY && !options->in_place && !options->outfile) ||
+        (options->in_place && (options->outfile || options->nest)) ||
         (cmd == CMD_SIGN && !((options->certfile && options->keyfile) ||
 #if OPENSSL_VERSION_NUMBER>=0x30000000L
             options->provider ||
@@ -5171,7 +5179,7 @@ static int main_execute(int argc, char **argv)
     if (options.cmd == CMD_SIGN && !read_crypto_params(&options))
         DO_EXIT_0("Failed to read key or certificates\n");
 
-    if (options.cmd != CMD_VERIFY) {
+    if (options.cmd != CMD_VERIFY && !options.in_place) {
         /* Create message digest BIO */
         hash = BIO_new(BIO_f_md());
 #if defined(__GNUC__)
@@ -5215,6 +5223,20 @@ static int main_execute(int argc, char **argv)
     }
     if (options.cmd == CMD_VERIFY) {
         ret = verify_signed_file(ctx, &options, 1);
+        goto skip_signing;
+    } else if (options.in_place) {
+        if (!ctx->format->attach_in_place) {
+            DO_EXIT_0("The -in-place option is only supported for PE files\n");
+        }
+        p7 = pkcs7_get_sigfile(ctx);
+        if (!p7) {
+            DO_EXIT_0("Unable to extract valid signature\n");
+        }
+        /* the file is verified before and after being modified */
+        ret = ctx->format->attach_in_place(ctx, p7);
+        PKCS7_free(p7);
+        if (!ret)
+            printf("Signature successfully attached\n");
         goto skip_signing;
     } else if (options.cmd == CMD_EXTRACT_DATA) {
         if (!ctx->format->pkcs7_contents_get) {
@@ -5359,7 +5381,7 @@ skip_signing:
         ctx->format->bio_free(hash, outdata);
         outdata = NULL;
     }
-    if (!ret && options.cmd == CMD_ATTACH) {
+    if (!ret && options.cmd == CMD_ATTACH && !options.in_place) {
         ret = check_attached_data(&options);
         if (!ret) {
             printf("Signature successfully attached\n");

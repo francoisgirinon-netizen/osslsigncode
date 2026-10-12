@@ -57,6 +57,7 @@ static int pe_process_data(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
 static PKCS7 *pe_pkcs7_signature_new(FILE_FORMAT_CTX *ctx, BIO *hash);
 static int pe_append_pkcs7(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
 static void pe_update_data_size(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
+static int pe_attach_in_place(FILE_FORMAT_CTX *ctx, PKCS7 *p7);
 static void pe_bio_free(BIO *hash, BIO *outdata);
 static void pe_ctx_cleanup(FILE_FORMAT_CTX *ctx);
 static int pe_is_detaching_supported(void);
@@ -76,6 +77,7 @@ FILE_FORMAT file_format_pe = {
     .pkcs7_signature_new = pe_pkcs7_signature_new,
     .append_pkcs7 = pe_append_pkcs7,
     .update_data_size = pe_update_data_size,
+    .attach_in_place = pe_attach_in_place,
     .bio_free = pe_bio_free,
     .ctx_cleanup = pe_ctx_cleanup,
     .is_detaching_supported = pe_is_detaching_supported
@@ -88,6 +90,9 @@ static uint32_t pe_calc_realchecksum(FILE_FORMAT_CTX *ctx);
 static uint64_t pe_checksum_add(uint64_t sum, const u_char *data, size_t len, uint32_t offset);
 static uint32_t pe_checksum_fold(uint64_t sum);
 static int pe_modify_header(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
+static int pe_verify_in_place_digests(FILE_FORMAT_CTX *ctx, PKCS7 *p7, uint64_t *sum);
+static int pe_write_file(const char *path, long offset, const u_char *data, size_t len);
+static int pe_check_in_place(FILE_FORMAT_CTX *ctx, PKCS7 *p7, uint32_t filesize);
 static BIO *pe_digest_calc_bio(FILE_FORMAT_CTX *ctx, const EVP_MD *md);
 static int pkcs7_get_page_hash(PKCS7 *p7, u_char **ph, int *phlen, int *phtype);
 static int pe_page_hash_get(u_char **ph, int *phlen, int *phtype, SpcAttributeTypeAndOptionalValue *obj);
@@ -485,6 +490,97 @@ static void pe_update_data_size(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
 }
 
 /*
+ * Attach a signature to an unsigned PE file without copying it: append the
+ * padding and the attribute certificate table, then update the Certificate
+ * Table entry and the CheckSum field.
+ * The digest of the signature is verified before the file is modified,
+ * and the file is restored if writing or checking the result fails.
+ * [in, out] ctx: structure holds input and output data
+ * [in] p7: PKCS#7 signature
+ * [returns] 1 on error or 0 on success
+ */
+static int pe_attach_in_place(FILE_FORMAT_CTX *ctx, PKCS7 *p7)
+{
+    PE_CTX *pe_ctx = ctx->pe_ctx;
+    const char *infile = ctx->options->infile;
+    const u_char *indata = (const u_char *)ctx->options->indata;
+    uint32_t field = pe_ctx->header_size + 88;
+    uint32_t sigdir = pe_ctx->header_size + 152 + pe_ctx->pe32plus * 16;
+    uint32_t filesize = pe_ctx->fileend;
+    uint32_t sigpos = (filesize + 7) & ~7U;
+    uint32_t siglen, taillen, checksum;
+    u_char oldhdr[12], newhdr[12];
+    u_char *tail = NULL, *p;
+    int len, padlen, ok;
+    uint64_t sum;
+
+    if (GET_UINT32_LE(indata + sigdir) || GET_UINT32_LE(indata + sigdir + 4)) {
+        fprintf(stderr, "Attaching in place requires an unsigned file\n");
+        return 1; /* FAILED */
+    }
+    if (filesize > UINT32_MAX - 8) {
+        fprintf(stderr, "Unsupported file - too large: %s\n", infile);
+        return 1; /* FAILED */
+    }
+    if (!pe_verify_in_place_digests(ctx, p7, &sum))
+        return 1; /* FAILED */
+
+    /* padding to an 8-byte boundary, WIN_CERTIFICATE and signature */
+    len = i2d_PKCS7(p7, NULL);
+    if (len <= 0 || (uint64_t)sigpos + (uint64_t)len + 16 > UINT32_MAX) {
+        fprintf(stderr, "i2d_PKCS memory allocation failed: %d\n", len);
+        return 1; /* FAILED */
+    }
+    padlen = len % 8 ? 8 - len % 8 : 0;
+    siglen = (uint32_t)(len + 8 + padlen);
+    taillen = sigpos - filesize + siglen;
+    tail = OPENSSL_zalloc(taillen);
+    if (!tail) {
+        fprintf(stderr, "Memory allocation failed\n");
+        return 1; /* FAILED */
+    }
+    p = tail + sigpos - filesize;
+    PUT_UINT32_LE(siglen, p);
+    PUT_UINT16_LE(WIN_CERT_REVISION_2_0, p + 4);
+    PUT_UINT16_LE(WIN_CERT_TYPE_PKCS_SIGNED_DATA, p + 6);
+    p += 8;
+    i2d_PKCS7(p7, &p);
+    sum = pe_checksum_add(sum, tail, taillen, filesize);
+
+    /* the new CheckSum field and Certificate Table entry */
+    PUT_UINT32_LE(sigpos, newhdr + 4);
+    PUT_UINT32_LE(siglen, newhdr + 8);
+    sum = pe_checksum_add(sum, newhdr + 4, 8, sigdir);
+    checksum = pe_checksum_fold(sum) + sigpos + siglen;
+    PUT_UINT32_LE(checksum, newhdr);
+    memcpy(oldhdr, indata + field, 4);
+    memcpy(oldhdr + 4, indata + sigdir, 8);
+
+    /* the file cannot be opened for writing while it is mapped on Windows */
+    unmap_file(ctx->options->indata, pe_ctx->fileend);
+    ctx->options->indata = NULL;
+
+    /* the header is updated last, so that an interrupted write leaves it unchanged */
+    ok = pe_write_file(infile, -1, tail, taillen);
+    OPENSSL_free(tail);
+    if (ok) {
+        ok = pe_write_file(infile, field, newhdr, 4)
+            && pe_write_file(infile, sigdir, newhdr + 4, 8)
+            && pe_check_in_place(ctx, p7, sigpos + siglen);
+        if (!ok && (!pe_write_file(infile, field, oldhdr, 4)
+                || !pe_write_file(infile, sigdir, oldhdr + 4, 8)))
+            fprintf(stderr, "Failed to restore the PE header of %s\n", infile);
+    }
+    if (!ok) {
+        fprintf(stderr, "Failed to attach the signature in place\n");
+        if (get_file_size(infile) != filesize && !truncate_file(infile, filesize))
+            fprintf(stderr, "Failed to restore the size of %s\n", infile);
+        return 1; /* FAILED */
+    }
+    return 0; /* OK */
+}
+
+/*
  * Free up an entire message digest BIO chain.
  * [out] hash: message digest BIO
  * [out] outdata: outdata file BIO (unused)
@@ -750,6 +846,142 @@ static int pe_modify_header(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata)
     }
     OPENSSL_free(buf);
     return 1; /* OK */
+}
+
+/*
+ * Verify the message digest and page hash of a signature against an unsigned
+ * PE file, and compute the checksum partial sum of the file in the same pass.
+ * The CheckSum field and the Certificate Table entry are left out of the sum.
+ * [in] ctx: structure holds input and output data
+ * [in] p7: PKCS#7 signature
+ * [out] sum: checksum partial sum
+ * [returns] 0 on error or 1 on success
+ */
+static int pe_verify_in_place_digests(FILE_FORMAT_CTX *ctx, PKCS7 *p7, uint64_t *sum)
+{
+    const u_char *indata = (const u_char *)ctx->options->indata;
+    uint32_t field = ctx->pe_ctx->header_size + 88;
+    uint32_t sigdir = ctx->pe_ctx->header_size + 152 + ctx->pe_ctx->pe32plus * 16;
+    uint32_t ranges[] = {0, field, field + 4, sigdir, sigdir + 8, ctx->pe_ctx->fileend};
+    int i, mdok, mdtype = -1, phtype = -1, phlen = 0;
+    const EVP_MD *md;
+    u_char mdbuf[EVP_MAX_MD_SIZE], cmdbuf[EVP_MAX_MD_SIZE];
+    u_char zeros[8] = {0};
+    u_char *ph = NULL;
+    BIO *bhash;
+
+    if (!pkcs7_get_content_digest(p7, mdbuf, &mdtype)
+        || (md = EVP_get_digestbynid(mdtype)) == NULL) {
+        fprintf(stderr, "Failed to extract current message digest\n\n");
+        return 0; /* FAILED */
+    }
+    bhash = BIO_new(BIO_f_md());
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
+    if (!BIO_set_md(bhash, md)) {
+        fprintf(stderr, "Unable to set the message digest of BIO\n");
+        BIO_free_all(bhash);
+        return 0; /* FAILED */
+    }
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    BIO_push(bhash, BIO_new(BIO_s_null()));
+    *sum = 0;
+    for (i = 0; i < 6; i += 2) {
+        uint32_t idx = ranges[i];
+
+        while (idx < ranges[i + 1]) {
+            size_t written, want = ranges[i + 1] - idx;
+
+            if (want > SIZE_64K)
+                want = SIZE_64K;
+            if (!BIO_write_ex(bhash, indata + idx, want, &written)) {
+                BIO_free_all(bhash);
+                return 0; /* FAILED */
+            }
+            *sum = pe_checksum_add(*sum, indata + idx, written, idx);
+            idx += (uint32_t)written;
+        }
+    }
+    /* pad (with 0's) unsigned PE file to 8 byte boundary */
+    if (ctx->pe_ctx->fileend % 8)
+        BIO_write(bhash, zeros, 8 - (int)(ctx->pe_ctx->fileend % 8));
+    BIO_gets(bhash, (char *)cmdbuf, EVP_MAX_MD_SIZE);
+    BIO_free_all(bhash);
+    mdok = compare_digests(mdbuf, cmdbuf, mdtype);
+    if (!mdok) {
+        fprintf(stderr, "Signature mismatch\n");
+        return 0; /* FAILED */
+    }
+    if (!pkcs7_get_page_hash(p7, &ph, &phlen, &phtype))
+        return 0; /* FAILED */
+    mdok = pe_verify_page_hash(ctx, ph, phlen, phtype);
+    OPENSSL_free(ph);
+    if (!mdok)
+        fprintf(stderr, "Signature mismatch\n");
+    return mdok;
+}
+
+/*
+ * Write data to a file, at a given offset or at the end of the file.
+ * [in] path: file name
+ * [in] offset: file offset, or -1 to append
+ * [in] data: data to write
+ * [in] len: data length
+ * [returns] 0 on error or 1 on success
+ */
+static int pe_write_file(const char *path, long offset, const u_char *data, size_t len)
+{
+    int ok;
+    FILE *file = fopen(path, offset < 0 ? "ab" : "r+b");
+
+    if (!file)
+        return 0; /* FAILED */
+    ok = (offset < 0 || !fseek(file, offset, SEEK_SET))
+        && fwrite(data, 1, len, file) == len;
+    if (fclose(file))
+        ok = 0;
+    return ok;
+}
+
+/*
+ * Check a PE file signed in place: its size, its checksum and its signature.
+ * [in] ctx: structure holds input and output data
+ * [in] p7: PKCS#7 signature written to the file
+ * [in] filesize: expected file size
+ * [returns] 0 on error or 1 on success
+ */
+static int pe_check_in_place(FILE_FORMAT_CTX *ctx, PKCS7 *p7, uint32_t filesize)
+{
+    GLOBAL_OPTIONS options = *ctx->options;
+    FILE_FORMAT_CTX file_ctx = *ctx;
+    PKCS7 *sig = NULL;
+    u_char *der = NULL, *sigder = NULL;
+    int len, siglen, ok = 0;
+
+    if (get_file_size(options.infile) != filesize)
+        return 0; /* FAILED */
+    options.indata = map_file(options.infile, filesize);
+    if (!options.indata)
+        return 0; /* FAILED */
+    file_ctx.options = &options;
+    file_ctx.pe_ctx = pe_ctx_get(options.indata, filesize);
+    if (file_ctx.pe_ctx
+        && file_ctx.pe_ctx->pe_checksum == pe_calc_realchecksum(&file_ctx)
+        && (sig = pe_pkcs7_get_file(options.indata, file_ctx.pe_ctx)) != NULL) {
+        len = i2d_PKCS7(p7, &der);
+        siglen = i2d_PKCS7(sig, &sigder);
+        ok = len > 0 && len == siglen && !memcmp(der, sigder, (size_t)len);
+    }
+    OPENSSL_free(der);
+    OPENSSL_free(sigder);
+    PKCS7_free(sig);
+    OPENSSL_free(file_ctx.pe_ctx);
+    unmap_file(options.indata, filesize);
+    return ok;
 }
 
 /*

@@ -47,6 +47,10 @@ osslsigncode - Authenticode signing, timestamping, extraction, attachment, remov
 [`-h` *digest*] [`-nest`] [`-add-msi-dse`]
 `-in` *input* `-out` *output*
 
+`osslsigncode` `attach-signature`
+`-sigin` *signature* `-in-place`
+`-in` *input*
+
 `osslsigncode` `extract-signature`
 [`-pem`]
 `-in` *input* `-out` *output*
@@ -138,6 +142,14 @@ Attach a detached PKCS#7 signature to an input file.
 
 With `-nest`, the new signature is attached as a nested signature instead of
 replacing the primary one, if the file format supports nested signatures.
+
+With `-in-place`, the signature is attached to the input file itself instead
+of a copy, which avoids rewriting large files.  This is only supported for
+unsigned PE files.  The digest of the signature is verified before the file is
+modified: the signature table is appended, then the PE header is updated.  If
+writing or checking the result fails, the original size and header of the file
+are restored.  A file left in an intermediate state by an interruption, such
+as a power failure, can be restored by truncating it to its original size.
 
 ## `extract-signature`
 

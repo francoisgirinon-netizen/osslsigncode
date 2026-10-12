@@ -420,6 +420,66 @@ if(Python3_FOUND AND NOT cryptography_error)
         endforeach(data_format ${formats})
     endforeach(ext ${extensions_nocat})
 
+### Attach signature in place ###
+
+    # Attach to a copy of the unsigned file, the result must be identical
+    # to the output file of attach-signature with the same signature
+    set(names "inplace" "inplace_mismatch" "inplace_signed")
+    set(sources "unsigned" "unsigned" "signed")
+    foreach(name source IN ZIP_LISTS names sources)
+        add_test(NAME "copy_${name}_exe"
+            COMMAND ${CMAKE_COMMAND} -E copy "${FILES}/${source}.exe" "${FILES}/${name}.exe")
+        set_tests_properties("copy_${name}_exe" PROPERTIES
+            DEPENDS "signed_exe")
+        list(APPEND ALL_TESTS "copy_${name}_exe")
+        set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/${name}.exe")
+    endforeach()
+    add_test(NAME "attached_inplace_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-in-place"
+        "-sigin" "${FILES}/signed_data_exe_der.der"
+        "-in" "${FILES}/inplace.exe")
+    set_tests_properties("attached_inplace_exe" PROPERTIES
+        DEPENDS "copy_inplace_exe;signed_data_exe_der")
+    add_test(NAME "compare_inplace_exe"
+        COMMAND ${CMAKE_COMMAND} -E compare_files
+        "${FILES}/inplace.exe" "${FILES}/attached_data_der_der.exe")
+    set_tests_properties("compare_inplace_exe" PROPERTIES
+        DEPENDS "attached_inplace_exe;attached_data_exe_der_der")
+
+    # A signature that does not match the file leaves it unchanged
+    add_test(NAME "attached_inplace_mismatch_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-in-place"
+        "-sigin" "${FILES}/msi.der"
+        "-in" "${FILES}/inplace_mismatch.exe")
+    set_tests_properties("attached_inplace_mismatch_exe" PROPERTIES
+        DEPENDS "copy_inplace_mismatch_exe;extract_der_msi"
+        WILL_FAIL TRUE)
+    add_test(NAME "compare_inplace_mismatch_exe"
+        COMMAND ${CMAKE_COMMAND} -E compare_files
+        "${FILES}/inplace_mismatch.exe" "${FILES}/unsigned.exe")
+    set_tests_properties("compare_inplace_mismatch_exe" PROPERTIES
+        DEPENDS "attached_inplace_mismatch_exe")
+
+    # A signed file is refused and left unchanged
+    add_test(NAME "attached_inplace_signed_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-in-place"
+        "-sigin" "${FILES}/exe.der"
+        "-in" "${FILES}/inplace_signed.exe")
+    set_tests_properties("attached_inplace_signed_exe" PROPERTIES
+        DEPENDS "copy_inplace_signed_exe;extract_der_exe"
+        WILL_FAIL TRUE)
+    add_test(NAME "compare_inplace_signed_exe"
+        COMMAND ${CMAKE_COMMAND} -E compare_files
+        "${FILES}/inplace_signed.exe" "${FILES}/signed.exe")
+    set_tests_properties("compare_inplace_signed_exe" PROPERTIES
+        DEPENDS "attached_inplace_signed_exe")
+    list(APPEND ALL_TESTS "attached_inplace_exe" "compare_inplace_exe"
+        "attached_inplace_mismatch_exe" "compare_inplace_mismatch_exe"
+        "attached_inplace_signed_exe" "compare_inplace_signed_exe")
+
 ### Verify PE checksum ###
 
     set(pe_checksum_files "signed" "nested" "added" "removed" "attached_pem" "attached_der")
