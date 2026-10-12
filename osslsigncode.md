@@ -44,7 +44,7 @@ osslsigncode - Authenticode signing, timestamping, extraction, attachment, remov
 
 `osslsigncode` `attach-signature`
 `-sigin` *signature*
-[`-h` *digest*] [`-nest`] [`-add-msi-dse`]
+[`-h` *digest*] [`-nest`] [`-skip-verify`] [`-add-msi-dse`]
 `-in` *input* `-out` *output*
 
 `osslsigncode` `attach-signature`
@@ -150,6 +150,10 @@ modified: the signature table is appended, then the PE header is updated.  If
 writing or checking the result fails, the original size and header of the file
 are restored.  A file left in an intermediate state by an interruption, such
 as a power failure, can be restored by truncating it to its original size.
+The output file is then read back to check that its digest matches the
+attached signature.  For PE files, this digest is already verified while the
+output file is written; with `-skip-verify`, the output file is not read back
+unless the signature contains page hashes.
 
 ## `extract-signature`
 

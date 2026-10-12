@@ -211,6 +211,19 @@ if(Python3_FOUND AND NOT cryptography_error)
         endforeach(format ${formats})
     endforeach(ext ${extensions_nocat})
 
+    # Attach a nested signature that does not match the file
+    # "attached_mismatch" tests are expected to fail
+    add_test(NAME "attached_mismatch_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-nest"
+        "-sigin" "${FILES}/msi.der"
+        "-in" "${FILES}/signed.exe"
+        "-out" "${FILES}/attached_mismatch.exe")
+    set_tests_properties("attached_mismatch_exe" PROPERTIES
+        DEPENDS "signed_exe;extract_der_msi"
+        WILL_FAIL TRUE)
+    list(APPEND ALL_TESTS "attached_mismatch_exe")
+
     # Add an unauthenticated blob to a previously-signed file
     foreach(ext ${extensions_all})
         add_test(NAME "added_${ext}"
@@ -543,6 +556,57 @@ if(Python3_FOUND AND NOT cryptography_error)
                 "${FILES}/large_${kind}.exe" "${FILES}/large_${kind}_signed.exe")
         endforeach(kind "section" "overlay")
     endif(LARGE_FILE_TESTS)
+### Attach a signature without reading back the output file ###
+
+    # The signature must not contain page hashes
+    add_test(NAME "data_nopagehash_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "extract-data"
+        "-h" "sha256"
+        "-in" "${FILES}/unsigned.exe"
+        "-out" "${FILES}/data_nopagehash_exe.der")
+    add_test(NAME "signed_data_nopagehash_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "sign"
+        "-pkcs12" "${CERTS}/cert.p12"
+        "-readpass" "${CERTS}/password.txt"
+        "-time" "1556668800" # Signing time: May  1 00:00:00 2019 GMT
+        "-h" "sha256"
+        "-in" "${FILES}/data_nopagehash_exe.der"
+        "-out" "${FILES}/signed_data_nopagehash_exe.der")
+    set_tests_properties("signed_data_nopagehash_exe" PROPERTIES
+        DEPENDS "data_nopagehash_exe")
+    add_test(NAME "attached_skip_verify_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-skip-verify"
+        "-sigin" "${FILES}/signed_data_nopagehash_exe.der"
+        "-in" "${FILES}/unsigned.exe"
+        "-out" "${FILES}/attached_skip_verify.exe")
+    # check_attached_data() prints the number of verified signatures
+    set_tests_properties("attached_skip_verify_exe" PROPERTIES
+        DEPENDS "signed_data_nopagehash_exe"
+        FAIL_REGULAR_EXPRESSION "Number of verified signatures")
+    add_test(NAME "verify_attached_skip_verify_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "verify"
+        "-time" "1567296000" # Signature verification time: Sep  1 00:00:00 2019 GMT
+        "-CAfile" "${CERTS}/CACert.pem"
+        "-CRLfile" "${CERTS}/CACertCRL.pem"
+        "-in" "${FILES}/attached_skip_verify.exe")
+    set_tests_properties("verify_attached_skip_verify_exe" PROPERTIES
+        DEPENDS "attached_skip_verify_exe")
+
+    # With page hashes, the output file is still read back
+    add_test(NAME "attached_skip_verify_pagehash_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-skip-verify"
+        "-sigin" "${FILES}/exe.der"
+        "-in" "${FILES}/unsigned.exe"
+        "-out" "${FILES}/attached_skip_verify_pagehash.exe")
+    set_tests_properties("attached_skip_verify_pagehash_exe" PROPERTIES
+        DEPENDS "extract_der_exe"
+        PASS_REGULAR_EXPRESSION "Number of verified signatures: 1")
+    list(APPEND ALL_TESTS "data_nopagehash_exe" "signed_data_nopagehash_exe"
+        "attached_skip_verify_exe" "verify_attached_skip_verify_exe"
+        "attached_skip_verify_pagehash_exe")
+
 
     if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.0.0" OR CURL_FOUND)
 
@@ -748,6 +812,10 @@ if(Python3_FOUND AND NOT cryptography_error)
         set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/jreq.tsq")
         set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/jresp.tsr")
     endforeach(ext ${extensions_all})
+
+    set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/attached_mismatch.exe"
+        "${FILES}/data_nopagehash_exe.der" "${FILES}/signed_data_nopagehash_exe.der"
+        "${FILES}/attached_skip_verify.exe" "${FILES}/attached_skip_verify_pagehash.exe")
 
     add_test(NAME "remove_files"
         COMMAND ${CMAKE_COMMAND} -E rm -f ${OUTPUT_FILES})
