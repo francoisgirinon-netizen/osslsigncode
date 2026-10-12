@@ -294,6 +294,7 @@ typedef struct {
     int addBlob;
     const char *blob_file;
     int nest;
+    int in_place;
     int index;
     int ignore_timestamp;
     int ignore_cdp;
@@ -559,6 +560,7 @@ struct file_format_st {
     PKCS7 *(*pkcs7_signature_new) (FILE_FORMAT_CTX *ctx, BIO *hash);
     int (*append_pkcs7) (FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
     void (*update_data_size) (FILE_FORMAT_CTX *data, BIO *outdata, PKCS7 *p7);
+    int (*attach_in_place) (FILE_FORMAT_CTX *ctx, PKCS7 *p7);
     void (*bio_free) (BIO *hash, BIO *outdata);
     void (*ctx_cleanup) (FILE_FORMAT_CTX *ctx);
     int (*is_detaching_supported) (void);

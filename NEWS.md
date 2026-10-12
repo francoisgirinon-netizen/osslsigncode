@@ -5,6 +5,8 @@
 - fixed Cygwin compilation by not passing ELF-specific linker flags
 - fixed MSI MsiDigitalSignatureEx digest ordering during signing and verification
 - fixed verification to report failure when timestamp verification fails
+- added the "-in-place" option to attach-signature to sign an unsigned PE
+  file without copying it
 
 ### 2.14 (2026.07.20)
 

@@ -8,6 +8,10 @@
 #include "osslsigncode.h"
 #include "helpers.h"
 
+#ifdef WIN32
+#include <io.h>
+#endif /* WIN32 */
+
 /* Prototypes */
 static SpcSpOpusInfo *spc_sp_opus_info_create(FILE_FORMAT_CTX *ctx);
 static int spc_indirect_data_content_create(u_char **blob, int *len, FILE_FORMAT_CTX *ctx);
@@ -108,6 +112,27 @@ void unmap_file(char *indata, const size_t size)
     UnmapViewOfFile(indata);
 #else
     munmap(indata, size);
+#endif /* WIN32 */
+}
+
+/*
+ * [in] infile: file to truncate or extend
+ * [in] size: new file size
+ * [returns] 0 on error or 1 on success
+ */
+int truncate_file(const char *infile, const uint32_t size)
+{
+#ifdef WIN32
+    int ok, fd = _open(infile, _O_WRONLY | _O_BINARY);
+
+    if (fd < 0)
+        return 0; /* FAILED */
+    ok = !_chsize_s(fd, (__int64)size);
+    if (_close(fd))
+        ok = 0;
+    return ok;
+#else
+    return !truncate(infile, (off_t)size);
 #endif /* WIN32 */
 }
 
