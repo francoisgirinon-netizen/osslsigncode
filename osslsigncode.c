@@ -3624,6 +3624,35 @@ static int check_attached_data(GLOBAL_OPTIONS *options)
 }
 
 /*
+ * Set the message digest BIO to the digest algorithm of a signature.
+ * CMD_ATTACH command specific
+ * [out] hash: message digest BIO
+ * [in] p7: PKCS#7 signature
+ * [returns] 0 on error or 1 on success
+ */
+static int hash_md_set_from_pkcs7(BIO *hash, PKCS7 *p7)
+{
+    int ret, mdtype = -1;
+    const EVP_MD *md;
+    u_char mdbuf[EVP_MAX_MD_SIZE];
+
+    if (!pkcs7_get_content_digest(p7, mdbuf, &mdtype))
+        return 0; /* FAILED */
+    md = EVP_get_digestbynid(mdtype);
+    if (!md)
+        return 0; /* FAILED */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
+    ret = BIO_set_md(hash, md) > 0;
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    return ret;
+}
+
+/*
  * [in, out] options: structure holds the input data
  * [returns] none
  */
@@ -5287,10 +5316,22 @@ static int main_execute(int argc, char **argv)
             PKCS7_free(cursig);
             DO_EXIT_0("Unable to extract valid signature\n");
         }
+        if (ctx->format->verify_processed_digest && !hash_md_set_from_pkcs7(hash, p7)) {
+            PKCS7_free(cursig);
+            PKCS7_free(p7);
+            DO_EXIT_0("Unable to set the message digest of BIO\n");
+        }
         if (ctx->format->process_data) {
             if (!ctx->format->process_data(ctx, hash, outdata)) {
                 DO_EXIT_0("Unable to read input file\n");
             }
+        }
+        /* check_attached_data() alone would also accept the current signature with -nest */
+        if (ctx->format->verify_processed_digest
+            && !ctx->format->verify_processed_digest(ctx, hash, p7)) {
+            PKCS7_free(cursig);
+            PKCS7_free(p7);
+            DO_EXIT_0("Signature mismatch\n");
         }
     } else if (options.cmd == CMD_SIGN) {
         if (options.nest) {

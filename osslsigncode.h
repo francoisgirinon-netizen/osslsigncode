@@ -555,6 +555,7 @@ struct file_format_st {
     PKCS7 *(*pkcs7_extract_to_nest) (FILE_FORMAT_CTX *ctx);
     int (*remove_pkcs7) (FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
     int (*process_data) (FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
+    int (*verify_processed_digest) (FILE_FORMAT_CTX *ctx, BIO *hash, PKCS7 *p7);
     PKCS7 *(*pkcs7_signature_new) (FILE_FORMAT_CTX *ctx, BIO *hash);
     int (*append_pkcs7) (FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
     void (*update_data_size) (FILE_FORMAT_CTX *data, BIO *outdata, PKCS7 *p7);

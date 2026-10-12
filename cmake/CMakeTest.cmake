@@ -208,6 +208,19 @@ if(Python3_FOUND AND NOT cryptography_error)
         endforeach(format ${formats})
     endforeach(ext ${extensions_nocat})
 
+    # Attach a nested signature that does not match the file
+    # "attached_mismatch" tests are expected to fail
+    add_test(NAME "attached_mismatch_exe"
+        COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+        "-nest"
+        "-sigin" "${FILES}/msi.der"
+        "-in" "${FILES}/signed.exe"
+        "-out" "${FILES}/attached_mismatch.exe")
+    set_tests_properties("attached_mismatch_exe" PROPERTIES
+        DEPENDS "signed_exe;extract_der_msi"
+        WILL_FAIL TRUE)
+    list(APPEND ALL_TESTS "attached_mismatch_exe")
+
     # Add an unauthenticated blob to a previously-signed file
     foreach(ext ${extensions_all})
         add_test(NAME "added_${ext}"
@@ -624,6 +637,8 @@ if(Python3_FOUND AND NOT cryptography_error)
         set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/jreq.tsq")
         set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/jresp.tsr")
     endforeach(ext ${extensions_all})
+
+    set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/attached_mismatch.exe")
 
     add_test(NAME "remove_files"
         COMMAND ${CMAKE_COMMAND} -E rm -f ${OUTPUT_FILES})

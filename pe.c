@@ -53,6 +53,7 @@ static PKCS7 *pe_pkcs7_extract(FILE_FORMAT_CTX *ctx);
 static PKCS7 *pe_pkcs7_extract_to_nest(FILE_FORMAT_CTX *ctx);
 static int pe_remove_pkcs7(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
 static int pe_process_data(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata);
+static int pe_verify_processed_digest(FILE_FORMAT_CTX *ctx, BIO *hash, PKCS7 *p7);
 static PKCS7 *pe_pkcs7_signature_new(FILE_FORMAT_CTX *ctx, BIO *hash);
 static int pe_append_pkcs7(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
 static void pe_update_data_size(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7);
@@ -72,6 +73,7 @@ FILE_FORMAT file_format_pe = {
     .pkcs7_extract_to_nest = pe_pkcs7_extract_to_nest,
     .remove_pkcs7 = pe_remove_pkcs7,
     .process_data = pe_process_data,
+    .verify_processed_digest = pe_verify_processed_digest,
     .pkcs7_signature_new = pe_pkcs7_signature_new,
     .append_pkcs7 = pe_append_pkcs7,
     .update_data_size = pe_update_data_size,
@@ -365,6 +367,40 @@ static int pe_process_data(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata)
         return 0; /* FAILED */
     }
     return 1; /* OK */
+}
+
+/*
+ * Compare the message digest computed by pe_process_data() with the message
+ * digest of the signature: pe_process_data() writes to the hash BIO exactly
+ * the data covered by the Authenticode digest of the output file.
+ * [in] ctx: structure holds input and output data (unused)
+ * [in] hash: message digest BIO, set to the digest algorithm of p7
+ * [in] p7: PKCS#7 signature
+ * [returns] 0 on error or 1 on success
+ */
+static int pe_verify_processed_digest(FILE_FORMAT_CTX *ctx, BIO *hash, PKCS7 *p7)
+{
+    int mdtype = -1;
+    const EVP_MD *md = NULL;
+    u_char mdbuf[EVP_MAX_MD_SIZE];
+    u_char cmdbuf[EVP_MAX_MD_SIZE];
+
+    /* squash the unused parameter warning */
+    (void)ctx;
+
+    if (!pkcs7_get_content_digest(p7, mdbuf, &mdtype)) {
+        fprintf(stderr, "Failed to extract current message digest\n\n");
+        return 0; /* FAILED */
+    }
+    if (BIO_get_md(hash, &md) <= 0 || !md || EVP_MD_nid(md) != mdtype) {
+        fprintf(stderr, "Unexpected message digest algorithm\n\n");
+        return 0; /* FAILED */
+    }
+    if (BIO_gets(hash, (char *)cmdbuf, EVP_MAX_MD_SIZE) != EVP_MD_size(md)) {
+        fprintf(stderr, "Failed to calculate message digest\n\n");
+        return 0; /* FAILED */
+    }
+    return compare_digests(mdbuf, cmdbuf, mdtype);
 }
 
 /*
