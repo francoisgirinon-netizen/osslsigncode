@@ -41,6 +41,7 @@ if(Python3_FOUND)
         file(COPY
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/files"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/conf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_pe_checksum.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/client_http.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_certificates.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/start_server.py"
@@ -418,6 +419,30 @@ if(Python3_FOUND AND NOT cryptography_error)
             endforeach(format ${formats})
         endforeach(data_format ${formats})
     endforeach(ext ${extensions_nocat})
+
+### Verify PE checksum ###
+
+    set(pe_checksum_files "signed" "nested" "added" "removed" "attached_pem" "attached_der")
+    set(pe_checksum_tests "signed_exe" "nested_exe" "added_exe" "removed_exe"
+        "attached_pem_exe" "attached_der_exe")
+    foreach(data_format ${formats})
+        foreach(format ${formats})
+            list(APPEND pe_checksum_files "attached_data_${data_format}_${format}")
+            list(APPEND pe_checksum_tests "attached_data_exe_${data_format}_${format}")
+        endforeach(format ${formats})
+    endforeach(data_format ${formats})
+    list(TRANSFORM pe_checksum_files PREPEND "${FILES}/")
+    list(TRANSFORM pe_checksum_files APPEND ".exe")
+    add_test(NAME "pe_checksum"
+        COMMAND ${Python3_EXECUTABLE} "${TEST_DIR}/check_pe_checksum.py" ${pe_checksum_files})
+    set_tests_properties("pe_checksum" PROPERTIES
+        DEPENDS "${pe_checksum_tests}")
+    list(APPEND ALL_TESTS "pe_checksum")
+
+    # verify only warns about an invalid PE checksum
+    set_tests_properties("verify_signed_exe" "verify_nested_exe" "verify_added_exe"
+        "verify_attached_pem_exe" "verify_attached_der_exe" PROPERTIES
+        FAIL_REGULAR_EXPRESSION "invalid PE checksum")
 
 
     if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.0.0" OR CURL_FOUND)
