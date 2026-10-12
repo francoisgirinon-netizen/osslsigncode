@@ -39,6 +39,7 @@ struct pe_ctx_st {
     uint32_t sigpos;
     uint32_t siglen;
     uint32_t fileend;
+    uint64_t checksum_sum; /* checksum partial sum of the output file */
 };
 
 /* FILE_FORMAT method prototypes */
@@ -83,7 +84,6 @@ FILE_FORMAT file_format_pe = {
 /* Prototypes */
 static PE_CTX *pe_ctx_get(char *indata, uint32_t filesize);
 static PKCS7 *pe_pkcs7_get_file(char *indata, PE_CTX *pe_ctx);
-static uint32_t pe_calc_checksum(BIO *bio, uint32_t header_size);
 static uint32_t pe_calc_realchecksum(FILE_FORMAT_CTX *ctx);
 static uint64_t pe_checksum_add(uint64_t sum, const u_char *data, size_t len, uint32_t offset);
 static uint32_t pe_checksum_fold(uint64_t sum);
@@ -407,7 +407,7 @@ static PKCS7 *pe_pkcs7_signature_new(FILE_FORMAT_CTX *ctx, BIO *hash)
 
 /*
  * Append signature to the outfile.
- * [in, out] ctx: structure holds input and output data (unused)
+ * [in, out] ctx: structure holds input and output data
  * [out] outdata: outdata file BIO
  * [in] p7: PKCS#7 signature
  * [returns] 1 on error or 0 on success
@@ -420,9 +420,6 @@ static int pe_append_pkcs7(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
     u_char buf[] = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
-
-    /* squash the unused parameter warning */
-    (void)ctx;
 
     if (((len = i2d_PKCS7(p7, NULL)) <= 0)
         || (p = OPENSSL_malloc((size_t)len)) == NULL) {
@@ -437,6 +434,10 @@ static int pe_append_pkcs7(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
     PUT_UINT16_LE(WIN_CERT_TYPE_PKCS_SIGNED_DATA, buf + 6);
     BIO_write(outdata, buf, 8);
     BIO_write(outdata, p, len);
+    ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum,
+        buf, 8, ctx->pe_ctx->fileend);
+    ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum,
+        p, (size_t)len, ctx->pe_ctx->fileend + 8);
     /* pad (with 0's) asn1 blob to 8 byte boundary */
     if (padlen > 0) {
         memset(p, 0, (size_t)padlen);
@@ -455,7 +456,7 @@ static int pe_append_pkcs7(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
  */
 static void pe_update_data_size(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
 {
-    uint32_t checksum;
+    uint32_t checksum, filesize = ctx->pe_ctx->fileend;
     u_char buf[] = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
@@ -463,19 +464,21 @@ static void pe_update_data_size(FILE_FORMAT_CTX *ctx, BIO *outdata, PKCS7 *p7)
     if (p7) {
         int len = i2d_PKCS7(p7, NULL);
         int padlen = len % 8 ? 8 - len % 8 : 0;
+        uint32_t sigdir = ctx->pe_ctx->header_size + 152 + ctx->pe_ctx->pe32plus * 16;
 
         /* Update signature position and size */
-        (void)BIO_seek(outdata,
-            ctx->pe_ctx->header_size + 152 + ctx->pe_ctx->pe32plus * 16);
+        (void)BIO_seek(outdata, sigdir);
         /* Previous file end = signature table start */
         PUT_UINT32_LE(ctx->pe_ctx->fileend, buf);
-        BIO_write(outdata, buf, 4);
-        PUT_UINT32_LE(len + 8 + padlen, buf);
-        BIO_write(outdata, buf, 4);
+        PUT_UINT32_LE(len + 8 + padlen, buf + 4);
+        BIO_write(outdata, buf, 8);
+        ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum,
+            buf, 8, sigdir);
+        filesize += (uint32_t)(len + 8 + padlen);
     } /* else CMD_REMOVE */
 
-    /* write back checksum */
-    checksum = pe_calc_checksum(outdata, ctx->pe_ctx->header_size);
+    /* write back checksum, the output file size is a multiple of 8 */
+    checksum = pe_checksum_fold(ctx->pe_ctx->checksum_sum) + filesize;
     (void)BIO_seek(outdata, ctx->pe_ctx->header_size + 88);
     PUT_UINT32_LE(checksum, buf);
     BIO_write(outdata, buf, 4);
@@ -628,40 +631,6 @@ static PKCS7 *pe_pkcs7_get_file(char *indata, PE_CTX *pe_ctx)
 }
 
 /*
- * Calculate checksum.
- * A signed PE file is padded (with 0's) to 8 byte boundary,
- * ignore any last odd byte in an unsigned file.
- * [in] outdata: outdata file BIO
- * [in] header_size: PE header size
- * [returns] checksum
- */
-static uint32_t pe_calc_checksum(BIO *outdata, uint32_t header_size)
-{
-    uint32_t checkSum = 0, offset = 0;
-    int nread;
-    unsigned short *buf = OPENSSL_malloc(SIZE_64K);
-
-    /* recalculate the checksum */
-    (void)BIO_seek(outdata, 0);
-    while ((nread = BIO_read(outdata, buf, SIZE_64K)) > 0) {
-        unsigned short val;
-        int i;
-        for (i = 0; i < nread / 2; i++) {
-            val = LE_UINT16(buf[i]);
-            if (offset == header_size + 88 || offset == header_size + 90)
-                val = 0;
-            checkSum += val;
-            checkSum = LOWORD(LOWORD(checkSum) + HIWORD(checkSum));
-            offset += 2;
-        }
-    }
-    OPENSSL_free(buf);
-    checkSum = LOWORD(LOWORD(checkSum) + HIWORD(checkSum));
-    checkSum += offset;
-    return checkSum;
-}
-
-/*
  * Compute a checkSum value of the signed or unsigned PE file.
  * [in] ctx: structure holds input and output data
  * [returns] checksum
@@ -729,12 +698,16 @@ static int pe_modify_header(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata)
 {
     size_t i, len, written;
     char *buf;
+    const u_char *indata = (const u_char *)ctx->options->indata;
 
+    /* the zeroed CheckSum and Certificate Table fields add nothing to the sum */
+    ctx->pe_ctx->checksum_sum = 0;
     i = len = ctx->pe_ctx->header_size + 88;
     if (!BIO_write_ex(hash, ctx->options->indata, len, &written)
         || written != len) {
         return 0; /* FAILED */
     }
+    ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum, indata, len, 0);
     buf = OPENSSL_malloc(SIZE_64K);
     memset(buf, 0, 4);
     BIO_write(outdata, buf, 4); /* zero out checksum */
@@ -745,16 +718,23 @@ static int pe_modify_header(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata)
         OPENSSL_free(buf);
         return 0; /* FAILED */
     }
+    ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum,
+        indata + i, len, (uint32_t)i);
     i += 60 + ctx->pe_ctx->pe32plus * 16;
     memset(buf, 0, 8);
     BIO_write(outdata, buf, 8); /* zero out sigtable offset + pos */
     i += 8;
     len = ctx->pe_ctx->fileend - i;
     while (len > 0) {
-        if (!BIO_write_ex(hash, ctx->options->indata + i, len, &written)) {
+        /* sum each chunk while it is still in the CPU cache */
+        size_t want = len > SIZE_64K ? SIZE_64K : len;
+
+        if (!BIO_write_ex(hash, ctx->options->indata + i, want, &written)) {
             OPENSSL_free(buf);
             return 0; /* FAILED */
         }
+        ctx->pe_ctx->checksum_sum = pe_checksum_add(ctx->pe_ctx->checksum_sum,
+            indata + i, written, (uint32_t)i);
         len -= written;
         i += written;
     }
