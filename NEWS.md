@@ -7,6 +7,8 @@
 - fixed verification to report failure when timestamp verification fails
 - fixed attach-signature -nest accepting a PE signature that does not match
   the file
+- added the "-skip-verify" option to attach-signature to avoid reading back
+  a PE output file whose digest was already verified while writing it
 
 ### 2.14 (2026.07.20)
 

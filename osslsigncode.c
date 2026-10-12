@@ -3774,6 +3774,7 @@ static void usage(const char *argv0, const char *cmd)
         printf("%1sattach-signature [ -sigin ] <file>\n", "");
         printf("%12s[ -h {md5,sha1,sha2(56),sha384,sha512} ]\n", "");
         printf("%12s[ -nest ]\n", "");
+        printf("%12s[ -skip-verify ]\n", "");
         printf("%12s[ -add-msi-dse ]\n", "");
         printf("%12s[ -in ] <file> [ -out ] <file>\n\n", "");
     }
@@ -3865,6 +3866,7 @@ static void help_for(const char *argv0, const char *cmd)
     const char *cmds_readpass[] = {"sign", NULL};
     const char *cmds_require_leaf_hash[] = {"verify", NULL};
     const char *cmds_sigin[] = {"attach-signature", NULL};
+    const char *cmds_skip_verify[] = {"attach-signature", NULL};
     const char *cmds_time[] = {"sign", "verify", NULL};
     const char *cmds_ignore_timestamp[] = {"verify", NULL};
     const char *cmds_ignore_cdp[] = {"verify", NULL};
@@ -4023,6 +4025,10 @@ static void help_for(const char *argv0, const char *cmd)
     }
     if (on_list(cmd, cmds_sigin))
         printf("%-24s= a file containing the signature to be attached\n", "-sigin");
+    if (on_list(cmd, cmds_skip_verify)) {
+        printf("%-24s= do not read the output file back to verify it, if the digest\n", "-skip-verify");
+        printf("%26swas verified while writing it (PE files without page hashes)\n", "");
+    }
     if (on_list(cmd, cmds_ignore_timestamp))
         printf("%-24s= disable verification of the Timestamp Server signature\n", "-ignore-timestamp");
     if (on_list(cmd, cmds_ignore_cdp))
@@ -4963,6 +4969,8 @@ static int main_configure(int argc, char **argv, GLOBAL_OPTIONS *options)
             }
         } else if ((cmd == CMD_SIGN || cmd == CMD_ATTACH) && !strcmp(*argv, "-nest")) {
             options->nest = 1;
+        } else if ((cmd == CMD_ATTACH) && !strcmp(*argv, "-skip-verify")) {
+            options->skip_verify = 1;
         } else if ((cmd == CMD_ADD || cmd == CMD_VERIFY) && !strcmp(*argv, "-index")) {
             char *tmp_str;
             if (--argc < 1 ) {
@@ -5185,6 +5193,7 @@ static int main_execute(int argc, char **argv)
     BIO *outdata = NULL;
     BIO *hash = NULL;
     int ret = -1;
+    int digest_verified = 0;
 
     /* reset options */
     memset(&options, 0, sizeof(GLOBAL_OPTIONS));
@@ -5327,11 +5336,13 @@ static int main_execute(int argc, char **argv)
             }
         }
         /* check_attached_data() alone would also accept the current signature with -nest */
-        if (ctx->format->verify_processed_digest
-            && !ctx->format->verify_processed_digest(ctx, hash, p7)) {
-            PKCS7_free(cursig);
-            PKCS7_free(p7);
-            DO_EXIT_0("Signature mismatch\n");
+        if (ctx->format->verify_processed_digest) {
+            digest_verified = ctx->format->verify_processed_digest(ctx, hash, p7);
+            if (!digest_verified) {
+                PKCS7_free(cursig);
+                PKCS7_free(p7);
+                DO_EXIT_0("Signature mismatch\n");
+            }
         }
     } else if (options.cmd == CMD_SIGN) {
         if (options.nest) {
@@ -5394,6 +5405,11 @@ static int main_execute(int argc, char **argv)
         ctx->format->update_data_size(ctx, outdata, p7);
     }
     PKCS7_free(p7);
+    /* a write error would otherwise only be detected by check_attached_data() */
+    if (options.skip_verify && digest_verified == 2 && BIO_flush(outdata) <= 0) {
+        ret = 1; /* FAILED */
+        DO_EXIT_0("Unable to write the output file\n");
+    }
 
 skip_signing:
     if (ctx->format->bio_free) {
@@ -5401,7 +5417,10 @@ skip_signing:
         outdata = NULL;
     }
     if (!ret && options.cmd == CMD_ATTACH) {
-        ret = check_attached_data(&options);
+        if (options.skip_verify && digest_verified != 2)
+            printf("Warning: -skip-verify is only supported for PE files without page hashes\n");
+        if (!options.skip_verify || digest_verified != 2)
+            ret = check_attached_data(&options);
         if (!ret) {
             printf("Signature successfully attached\n");
         } else {

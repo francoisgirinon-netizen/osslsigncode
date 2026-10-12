@@ -376,14 +376,16 @@ static int pe_process_data(FILE_FORMAT_CTX *ctx, BIO *hash, BIO *outdata)
  * [in] ctx: structure holds input and output data (unused)
  * [in] hash: message digest BIO, set to the digest algorithm of p7
  * [in] p7: PKCS#7 signature
- * [returns] 0 on error or 1 on success
+ * [returns] 0 on error, 1 if the digest matches, 2 if the digest matches
+ *           and p7 has no page hash left to verify on the output file
  */
 static int pe_verify_processed_digest(FILE_FORMAT_CTX *ctx, BIO *hash, PKCS7 *p7)
 {
-    int mdtype = -1;
+    int mdtype = -1, phtype = -1, phlen = 0;
     const EVP_MD *md = NULL;
     u_char mdbuf[EVP_MAX_MD_SIZE];
     u_char cmdbuf[EVP_MAX_MD_SIZE];
+    u_char *ph = NULL;
 
     /* squash the unused parameter warning */
     (void)ctx;
@@ -400,7 +402,15 @@ static int pe_verify_processed_digest(FILE_FORMAT_CTX *ctx, BIO *hash, PKCS7 *p7
         fprintf(stderr, "Failed to calculate message digest\n\n");
         return 0; /* FAILED */
     }
-    return compare_digests(mdbuf, cmdbuf, mdtype);
+    if (!compare_digests(mdbuf, cmdbuf, mdtype))
+        return 0; /* FAILED */
+    if (!pkcs7_get_page_hash(p7, &ph, &phlen, &phtype))
+        return 1; /* OK, but the output file has to be checked */
+    if (ph) {
+        OPENSSL_free(ph);
+        return 1; /* OK, but the page hash has to be verified */
+    }
+    return 2; /* OK */
 }
 
 /*

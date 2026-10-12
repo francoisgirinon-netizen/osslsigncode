@@ -293,6 +293,7 @@ typedef struct {
     int addBlob;
     const char *blob_file;
     int nest;
+    int skip_verify;
     int index;
     int ignore_timestamp;
     int ignore_cdp;
