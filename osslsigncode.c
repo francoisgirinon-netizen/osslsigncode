@@ -3289,7 +3289,7 @@ static int verify_signature(FILE_FORMAT_CTX *ctx, PKCS7 *p7)
 static int verify_signed_file(FILE_FORMAT_CTX *ctx, GLOBAL_OPTIONS *options,
     int verify_signature_flag)
 {
-    int i, ret = 1, verified = 0;
+    int i, ret = 1, verified = 0, mismatch = 0;
     int detached = options->catalog ? 1 : 0;
     STACK_OF(PKCS7) *signatures = NULL;
 
@@ -3322,6 +3322,8 @@ static int verify_signed_file(FILE_FORMAT_CTX *ctx, GLOBAL_OPTIONS *options,
         } else {
             digest_ok = (ctx->format->verify_digests(ctx, sig) != 0);
         }
+        if (!digest_ok)
+            mismatch = 1;
         if (digest_ok) {
             if (!verify_signature_flag) {
                 /* success: at least one digest matches */
@@ -3335,6 +3337,8 @@ static int verify_signed_file(FILE_FORMAT_CTX *ctx, GLOBAL_OPTIONS *options,
     }
     printf("Number of verified signatures: %d\n", verified);
     sk_PKCS7_pop_free(signatures, PKCS7_free);
+    if (options->check_all_digests && mismatch)
+        ret = 1;
 
     if (ret)
         ERR_print_errors_fp(stderr);
@@ -3594,6 +3598,8 @@ static int check_attached_data(GLOBAL_OPTIONS *options)
     }
     tmp_options->infile = options->outfile;
     tmp_options->cmd = CMD_VERIFY;
+    /* with -nest, the current signature always matches, so check every signature */
+    tmp_options->check_all_digests = 1;
 
     ctx = file_format_script.ctx_new(tmp_options, NULL, NULL);
     if (!ctx)

@@ -420,6 +420,33 @@ if(Python3_FOUND AND NOT cryptography_error)
     endforeach(ext ${extensions_nocat})
 
 
+### Attach a signature of another file ###
+
+    # The digest of the new nested signature must match the file. The signature of
+    # a file of another format cannot match, and it must not be accepted just because
+    # the current signature of the signed file matches.
+    # MSI files are not tested: a nested signature of another MD type is refused anyway.
+    foreach(ext "exe" "ex_" "ps1" "psc1" "mof" "js")
+        if(ext STREQUAL "js")
+            set(other_ext "mof")
+        else(ext STREQUAL "js")
+            set(other_ext "js")
+        endif(ext STREQUAL "js")
+        add_test(NAME "attach_nest_wrong_${ext}"
+            COMMAND ${Python3_EXECUTABLE} ${EXEC} ${OSSLSIGNCODE} "attach-signature"
+            "-nest"
+            "-h" "sha384"
+            "-sigin" "${FILES}/signed_data_${other_ext}_der.der"
+            "-in" "${FILES}/signed.${ext}"
+            "-out" "${FILES}/attach_nest_wrong_${ext}.${ext}")
+        set_tests_properties("attach_nest_wrong_${ext}" PROPERTIES
+            PASS_REGULAR_EXPRESSION "Signature mismatch"
+            DEPENDS "signed_${ext};signed_data_${other_ext}_der")
+        list(APPEND ALL_TESTS "attach_nest_wrong_${ext}")
+        set(OUTPUT_FILES ${OUTPUT_FILES} "${FILES}/attach_nest_wrong_${ext}.${ext}")
+    endforeach(ext "exe" "ex_" "ps1" "psc1" "mof" "js")
+
+
     if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.0.0" OR CURL_FOUND)
 
 ### Sign with Time-Stamp Authority ###

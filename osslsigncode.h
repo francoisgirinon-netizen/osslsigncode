@@ -322,6 +322,7 @@ typedef struct {
     char *tsa_keyfile;
     time_t tsa_time;
     int nested_number;
+    int check_all_digests; /* the digest of every signature must match, not only one */
 } GLOBAL_OPTIONS;
 
 /*

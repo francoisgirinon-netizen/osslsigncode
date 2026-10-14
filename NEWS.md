@@ -5,6 +5,7 @@
 - fixed Cygwin compilation by not passing ELF-specific linker flags
 - fixed MSI MsiDigitalSignatureEx digest ordering during signing and verification
 - fixed verification to report failure when timestamp verification fails
+- fixed attach-signature -nest to reject a signature that does not match the file
 
 ### 2.14 (2026.07.20)
 
